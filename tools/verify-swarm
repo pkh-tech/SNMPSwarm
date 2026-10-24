@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""User-facing sanity check for a running SNMPSwarm."""
+import argparse
+import concurrent.futures
+import json
+import math
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+SYSNAME_OID = "1.3.6.1.2.1.1.5.0"
+COUNTER64_OID = "1.3.6.1.2.1.31.1.1.1.6.1"
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run(command, timeout=None):
+    return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+
+
+def check_device(row, community, timeout):
+    device_id, name, ip = row
+    if not ip:
+        return device_id, name, ip, False, False, False
+
+    ping_timeout = max(1, int(math.ceil(timeout)))
+    try:
+        ping = run(["ping", "-c", "1", "-W", str(ping_timeout), ip], timeout=ping_timeout + 1)
+        ping_ok = ping.returncode == 0
+    except subprocess.TimeoutExpired:
+        ping_ok = False
+
+    if not ping_ok:
+        return device_id, name, ip, False, False, False
+
+    try:
+        snmp = run([
+            "snmpget", "-v2c", "-c", community,
+            "-On", "-t", str(timeout), "-r", "0", ip,
+            SYSNAME_OID, COUNTER64_OID,
+        ], timeout=max(2.0, timeout + 1.0))
+        snmp_ok = snmp.returncode == 0
+        counter64_ok = snmp_ok and "Counter64:" in snmp.stdout
+    except subprocess.TimeoutExpired:
+        snmp_ok = False
+        counter64_ok = False
+    return device_id, name, ip, ping_ok, snmp_ok, counter64_ok
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Check containers, ping, SNMP and Counter64 for a running SNMPSwarm")
+    parser.add_argument("--name", default="snmpswarm", help="Swarm name (default: snmpswarm)")
+    parser.add_argument("--community", default="public", help="SNMPv2c community (default: public)")
+    parser.add_argument("--timeout", type=float, default=0.5, help="Per-device SNMP timeout seconds (default: 0.5)")
+    parser.add_argument("--workers", type=int, default=32, help="Parallel checks (default: 32)")
+    parser.add_argument("--manifest", help="Resolved manifest path; defaults to state/NAME/resolved-devices.yaml")
+    args = parser.parse_args()
+
+    missing = [cmd for cmd in ("docker", "ping", "snmpget") if not shutil.which(cmd)]
+    if missing:
+        print("Error: missing required command(s): " + ", ".join(missing), file=sys.stderr)
+        return 2
+
+    ps = run([
+        "docker", "ps", "-a", "-q",
+        "--filter", "label=network-swarm.managed=true",
+        "--filter", f"label=network-swarm.name={args.name}",
+    ])
+    if ps.returncode != 0:
+        print(ps.stderr.strip() or "Error querying Docker", file=sys.stderr)
+        return 2
+    ids = [x for x in ps.stdout.splitlines() if x.strip()]
+
+    configured = None
+    manifest_path = Path(args.manifest) if args.manifest else ROOT / "state" / args.name / "resolved-devices.yaml"
+    if manifest_path.is_file() and yaml is not None:
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text()) or {}
+            configured = len(manifest.get("devices", []) or [])
+        except Exception:
+            configured = None
+
+    if not ids:
+        print(f"Configured units:   {configured if configured is not None else 'unknown'}")
+        print("Managed containers: 0")
+        print("Result: FAIL - no managed containers found")
+        return 1
+
+    inspect = run(["docker", "inspect", *ids])
+    if inspect.returncode != 0:
+        print(inspect.stderr.strip() or "Error inspecting containers", file=sys.stderr)
+        return 2
+
+    rows = []
+    running = 0
+    for item in json.loads(inspect.stdout):
+        labels = item.get("Config", {}).get("Labels", {}) or {}
+        try:
+            device_id = int(labels.get("network-swarm.device-id", 0))
+        except ValueError:
+            device_id = 0
+        state = item.get("State", {}).get("Status", "unknown")
+        if state == "running":
+            running += 1
+        networks = item.get("NetworkSettings", {}).get("Networks", {}) or {}
+        ip = next((n.get("IPAddress") for n in networks.values() if n.get("IPAddress")), "") if state == "running" else ""
+        rows.append((device_id, item.get("Name", "").lstrip("/"), ip, state))
+
+    check_rows = [(d, n, ip) for d, n, ip, state in rows if state == "running"]
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        futures = [pool.submit(check_device, row, args.community, args.timeout) for row in check_rows]
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+
+    ping_ok = sum(1 for r in results if r[3])
+    snmp_ok = sum(1 for r in results if r[4])
+    counter64_ok = sum(1 for r in results if r[5])
+    reachable_snmp_failures = [r for r in results if r[3] and not r[4]]
+    counter_failures = [r for r in results if r[4] and not r[5]]
+    unreachable = [r for r in results if not r[3]]
+
+    print(f"Configured units:   {configured if configured is not None else 'unknown'}")
+    print(f"Managed containers: {len(ids)}")
+    print(f"Containers running: {running}")
+    print(f"Ping responding:    {ping_ok}")
+    print(f"SNMP responding:    {snmp_ok}")
+    print(f"Counter64 present:  {counter64_ok}")
+    if unreachable:
+        print(f"Currently unreachable: {len(unreachable)} (may be intentionally offline)")
+
+    hard_failures = []
+    if configured is not None and len(ids) != configured:
+        hard_failures.append(f"expected {configured} managed containers, found {len(ids)}")
+    if running != len(ids):
+        hard_failures.append(f"{len(ids) - running} managed container(s) are not running")
+    if reachable_snmp_failures:
+        hard_failures.append(f"{len(reachable_snmp_failures)} reachable unit(s) did not answer SNMP")
+    if counter_failures:
+        hard_failures.append(f"{len(counter_failures)} SNMP unit(s) did not expose Counter64")
+
+    if hard_failures:
+        print("Result: FAIL - " + "; ".join(hard_failures))
+        return 1
+    print("Result: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

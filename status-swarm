@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  PYTHON="python3"
+fi
+
+CONFIG_ARGS=()
+JSON_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--json" ]]; then
+    JSON_ARGS+=("--json")
+  else
+    CONFIG_ARGS=("-c" "$arg")
+  fi
+done
+
+if [[ ${#CONFIG_ARGS[@]} -eq 0 && -f "$ROOT/config.yaml" ]]; then
+  CONFIG_ARGS=("-c" "$ROOT/config.yaml")
+fi
+
+exec "$PYTHON" "$ROOT/host/cli.py" "${CONFIG_ARGS[@]}" status-swarm "${JSON_ARGS[@]}"

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Show total Docker memory used by one SNMPSwarm."""
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+
+UNITS = {
+    "B": 1,
+    "kB": 1000,
+    "KB": 1000,
+    "KiB": 1024,
+    "MB": 1000**2,
+    "MiB": 1024**2,
+    "GB": 1000**3,
+    "GiB": 1024**3,
+}
+
+
+def parse_bytes(text: str) -> float:
+    value = text.split("/", 1)[0].strip()
+    match = re.fullmatch(r"([0-9]+(?:[.,][0-9]+)?)\s*([A-Za-z]+)", value)
+    if not match:
+        raise ValueError(value)
+    number = float(match.group(1).replace(",", "."))
+    unit = match.group(2)
+    return number * UNITS[unit]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Total RAM used by running SNMPSwarm containers")
+    parser.add_argument("--name", default="snmpswarm", help="Swarm name (default: snmpswarm)")
+    args = parser.parse_args()
+
+    if not shutil.which("docker"):
+        print("Error: docker command not found", file=sys.stderr)
+        return 2
+
+    ps = subprocess.run([
+        "docker", "ps", "-q",
+        "--filter", "label=network-swarm.managed=true",
+        "--filter", f"label=network-swarm.name={args.name}",
+    ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if ps.returncode != 0:
+        print(ps.stderr.strip() or "Error querying Docker", file=sys.stderr)
+        return 2
+    ids = [x for x in ps.stdout.splitlines() if x.strip()]
+    if not ids:
+        print(f"No running SNMPSwarm containers found for '{args.name}'.")
+        return 1
+
+    stats = subprocess.run(
+        ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", *ids],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if stats.returncode != 0:
+        print(stats.stderr.strip() or "Error reading Docker stats", file=sys.stderr)
+        return 2
+
+    total = 0.0
+    for line in stats.stdout.splitlines():
+        try:
+            total += parse_bytes(line)
+        except (ValueError, KeyError):
+            print(f"Warning: could not parse Docker memory value: {line!r}", file=sys.stderr)
+
+    print(f"Containers:     {len(ids)}")
+    print(f"Total RAM used: {total / (1024**3):.2f} GiB")
+    print(f"Average/unit:   {total / len(ids) / (1024**2):.2f} MiB")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

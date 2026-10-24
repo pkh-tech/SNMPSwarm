@@ -1,0 +1,120 @@
+# SNMPSwarm 1.00 example configuration
+#
+# Mental model
+# ------------
+# 1. simulation.total_units is the complete number of simulated devices.
+# 2. Each named pool takes an exact number of units out of that total.
+# 3. Pools are exclusive: one unit can belong to only one configured pool.
+# 4. Pool size is always set with count. Percent-based allocation is not used.
+# 5. The sum of pool counts may never exceed total_units.
+# 6. Anything not taken by a pool automatically becomes a "standard unit".
+#
+# Built-in standard unit
+# ----------------------
+# A standard unit is SNMPSwarm's fallback for every setting not explicitly
+# changed by a pool:
+#
+#   identity:       endpoint ("Generic monitored endpoint")
+#   link speed:     100 Mbit/s
+#   downtime:       none; always online
+#   traffic:        0.00-0.05 Mbit/s, 1 interface, 5% variation
+#   initial uptime: 0 days
+#
+# Those defaults deliberately do NOT need to be written into config.yaml.
+# The config only describes deviations from a standard unit.
+
+simulation:
+  total_units: 200
+
+  # Optional simulation settings. These are shown to document them.
+  name: snmpswarm
+  random_seed: 12345
+  timezone: UTC
+  state_directory: ./state/snmpswarm
+  startup_parallelism: 10
+
+# Optional network settings. These match SNMPSwarm's built-in values.
+network:
+  subnet: 10.0.0.0/16
+  gateway: 10.0.255.254
+  snmp_port: 161
+  snmp_version: 2c
+  community: public
+
+pools:
+  # Take 43 units and make them deliberately unstable. Everything not
+  # mentioned in this pool stays at standard-unit values.
+  - name: unstable
+    count: 43
+    downtime:
+      events_per_day: 5
+      duration_minutes:
+        min: 2
+        max: 20
+      minimum_uptime_minutes: 15
+    initial_uptime:
+      days:
+        min: 0
+        max: 2
+
+  # Take another 50 units. Pools never overlap.
+  - name: mostly_stable
+    count: 50
+    downtime:
+      events_per_day: 1
+      duration_minutes:
+        min: 1
+        max: 5
+      minimum_uptime_minutes: 60
+    initial_uptime:
+      days:
+        min: 30
+        max: 500
+
+  # A pool can change several properties at once. These are 1 Gbit switches
+  # with heavier daytime traffic. They remain always online because no
+  # downtime section is defined for this pool.
+  - name: busy_switches
+    count: 20
+    identity:
+      type: switch
+    traffic:
+      interfaces: 1
+      link_speed_mbps: 1000
+      rate_mbps:
+        min: 2
+        max: 10
+      variation_percent: 15
+      periods:
+        - time: "09:00-17:30"
+          rate_mbps:
+            min: 30
+            max: 80
+        - time: "23:00-07:00"
+          rate_mbps:
+            min: 0.1
+            max: 2
+    initial_uptime:
+      days:
+        min: 100
+        max: 700
+
+# Allocation for this example:
+#   unstable:       43 units
+#   mostly_stable:  50 units
+#   busy_switches:  20 units
+#   standard unit:  87 units left over automatically
+#   total:          200 units
+#
+# Invalid example: if pool counts add up to 201 while total_units is 200,
+# SNMPSwarm stops with a configuration error before starting any containers.
+#
+# To use this file:
+#   cp config.example config.yaml
+#   ./start-swarm
+#
+# Or ignore config.yaml for one run and build pools directly on the CLI:
+#   ./start-swarm --no-config --count 100 \
+#     --pool unstable --pool-count 20 \
+#       --downtime-events 5 --downtime-duration 2:20 --minimum-uptime 15 \
+#     --pool rocksolid --pool-count 50

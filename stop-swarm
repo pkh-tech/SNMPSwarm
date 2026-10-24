@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  PYTHON="python3"
+fi
+
+CONFIG_ARGS=()
+if [[ $# -gt 0 ]]; then
+  CONFIG_ARGS=("-c" "$1")
+elif [[ -f "$ROOT/config.yaml" ]]; then
+  CONFIG_ARGS=("-c" "$ROOT/config.yaml")
+fi
+
+exec "$PYTHON" "$ROOT/host/cli.py" "${CONFIG_ARGS[@]}" stop-swarm
