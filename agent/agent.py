@@ -506,7 +506,7 @@ def parse_snmp_packet(data: bytes):
     pdu_offset = 0
     et, request_id_bytes, pdu_offset = parse_tl(pdu_bytes, pdu_offset)
     request_id = int.from_bytes(request_id_bytes, 'big') if request_id_bytes else 0
-    
+
     # GetBulk (0xA5) has different format: request_id, nonRepeaters,
     # maxRepetitions, varbinds.
     # Get/GetNext/Response (0xA0/0xA1/0xA2) have: request_id, error_status, error_index, varbinds
@@ -520,7 +520,7 @@ def parse_snmp_packet(data: bytes):
         error_status = int(error_status_bytes[0]) if error_status_bytes else 0
         et, error_index_bytes, pdu_offset = parse_tl(pdu_bytes, pdu_offset)
         error_index = int(error_index_bytes[0]) if error_index_bytes else 0
-    
+
     # varbind list
     et, vb_bytes, pdu_offset = parse_tl(pdu_bytes, pdu_offset)
     varbinds = []
@@ -598,7 +598,9 @@ class SNMPUDPHandler:
         self._running = True
         self._heartbeat.beat()
         self._thread = threading.Thread(
-            target=self._snmp_loop, name="snmp-udp", daemon=True
+            target=self._snmp_loop,
+            name="snmp-udp",
+            daemon=True,
         )
         self._thread.start()
         print(f"SNMP agent listening on 0.0.0.0:{self.port}", flush=True)
@@ -899,15 +901,15 @@ class SNMPUDPHandler:
     @staticmethod
     def _encode_no_such_instance(oid: tuple) -> bytes:
         """Encode a noSuchInstance variable-binding per RFC 3416 Section 4.2.1.
-        
+
         Returns a varbind where the value is context-specific tag 0x81
         with zero-length content, indicating the requested OID does not
         exist on this agent. The OID in the response matches the requested OID.
-        
+
         Per RFC 3416 Section 4.2.1:
         "the varBindValue field contains a reference to the object that
         could not be found (noSuchInstance)"
-        
+
         The exception syntax uses context-specific primitive tag [1] IMPLICIT
         which is BER tag 0x81 with zero-length content: b'\\x81\\x00'
         """
@@ -918,17 +920,17 @@ class SNMPUDPHandler:
     @staticmethod
     def _encode_end_of_mib_view(oid: tuple) -> bytes:
         """Encode an endOfMibView variable-binding per RFC 3416 Section 4.2.2.
-        
+
         Used to signal the end of an SNMP walk. Per RFC 3416 Section 4.2.2:
         "the varBindValue field contains an endOfMibView exception"
-        
+
         The varBindName is the requested OID, and the varBindValue is
         context-specific tag 0x82 with zero-length content.
-        
+
         Per RFC 3416 Section 4.2.2:
         "the varBindValue field contains a reference to the last
         successfully retrieved OID (endOfMibView)"
-        
+
         The exception syntax uses context-specific primitive tag [2] IMPLICIT
         which is BER tag 0x82 with zero-length content: b'\\x82\\x00'
         """
@@ -1360,14 +1362,17 @@ class ControlHTTPServer:
         self._server = MonitoredServer(("0.0.0.0", port), Handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(
-            target=self._serve, name="control-http", daemon=True
+            target=self._serve,
+            args=(self._server,),
+            name="control-http",
+            daemon=True,
         )
         self._thread.start()
         print(f"Control API listening on 0.0.0.0:{port}", flush=True)
 
-    def _serve(self):
+    def _serve(self, server):
         _set_kernel_thread_name("control-http")
-        self._server.serve_forever(poll_interval=0.5)
+        server.serve_forever(poll_interval=0.5)
 
     def is_alive(self) -> bool:
         """True while the serve_forever thread is still running."""
